@@ -64,7 +64,9 @@
   .btn-x{background:transparent;color:var(--red);border:1px solid #3a2a2a;padding:5px 9px;font-size:12px}
   .btn-x:hover{background:#2a1d1d}
 
-  .po{border:1px solid var(--line);border-radius:7px;padding:14px;margin-bottom:14px;background:var(--panel2)}
+  .po{border:1px solid var(--line);border-radius:7px;padding:14px;margin-bottom:14px;background:var(--panel2);transition:border-color .15s}
+  .po.po-bad{border-color:var(--red)}
+  .po-head .head-btns{display:flex;gap:8px}
   .po-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
   .po-head .ttl{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--accent);font-weight:600}
   .mem{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
@@ -145,6 +147,7 @@
     <div class="out-bar">
       <span class="lbl">Config generada</span>
       <div style="display:flex;gap:10px">
+        <button class="btn-ghost btn-sm" onclick="gen()">Generar config</button>
         <button class="btn-ghost btn-sm" onclick="downloadCfg()">Descargar .txt</button>
         <button class="btn btn-sm" onclick="copyCfg()">Copiar</button>
       </div>
@@ -157,6 +160,7 @@
 
 <script>
 let vlans=[]; let pos=[];
+let poCards=[];   // referencias a las tarjetas de Po (para resaltar las que tienen avisos)
 
 function el(html){const t=document.createElement('template');t.innerHTML=html.trim();return t.content.firstChild;}
 function $(id){return document.getElementById(id);}
@@ -189,54 +193,156 @@ function addPo(data){
   pos.push(d);renderPos();
 }
 function nextPoNum(){let n=1;const used=pos.map(p=>+p.num);while(used.includes(n))n++;return n;}
+
+/*
+  renderPos() reconstruye TODA la lista de Port-channels en el DOM.
+  Solo debe llamarse en cambios ESTRUCTURALES (agregar/quitar Po o miembros,
+  cargar ejemplo, limpiar), NUNCA en cada tecla: reconstruir el DOM mientras
+  se tipea destruye el input activo y hace perder el foco (BUG 1).
+
+  Para los cambios de texto se usan closures + referencias a nodos: cada
+  input actualiza el modelo (pos[]), regenera la config con gen() y refresca
+  solo los textos de previsualización (título y hints) vía textContent, sin
+  recrear ningún input. Así el foco se mantiene al escribir de corrido.
+*/
 function renderPos(){
   const c=$('poList');c.innerHTML='';
+  poCards=[];
   pos.forEach((p,i)=>{
-    const memHtml=p.members.map((m,j)=>`
-      <div class="mem">
-        <div>
-          <label>Interfaz local</label>
-          <input placeholder="GigabitEthernet1/1/1" value="${m.local}" oninput="pos[${i}].members[${j}].local=this.value;gen()">
-        </div>
-        <div>
-          <label>Puerto remoto (vecino)</label>
-          <input placeholder="Gi1/0/12" value="${m.remote}" oninput="pos[${i}].members[${j}].remote=this.value;gen()">
-          <div class="hint">${m.local? descMember(p,m):''}</div>
-        </div>
-        <button class="btn-x" onclick="pos[${i}].members.splice(${j},1);renderPos();gen()">✕</button>
-      </div>`).join('');
+    // --- Esqueleto del Po (sin handlers inline ni índices en strings) ---
     const card=el(`<div class="po">
       <div class="po-head">
-        <span class="ttl">Port-channel${p.num||'?'}</span>
-        <button class="btn-x" onclick="pos.splice(${i},1);renderPos();gen()">Quitar Po</button>
+        <span class="ttl"></span>
+        <div class="head-btns">
+          <button class="btn-ghost btn-sm" data-act="dupPo">Duplicar</button>
+          <button class="btn-x" data-act="rmPo">Quitar Po</button>
+        </div>
       </div>
       <div class="row">
-        <div><label>N° de Po</label><input value="${p.num}" oninput="pos[${i}].num=this.value;renderPos();gen()"></div>
-        <div><label>Vecino</label><input placeholder="EZEH0101" value="${p.neighbor}" oninput="pos[${i}].neighbor=this.value;renderPos();gen()"></div>
-        <div><label>IP del vecino</label><input placeholder="10.8.90.14" value="${p.ip}" oninput="pos[${i}].ip=this.value;renderPos();gen()"></div>
+        <div><label>N° de Po</label><input class="f-num"></div>
+        <div><label>Vecino</label><input class="f-neighbor" placeholder="EZEH0101"></div>
+        <div><label>IP del vecino</label><input class="f-ip" placeholder="10.8.90.14"></div>
       </div>
-      <div class="hint" style="margin-top:6px">description ${p.neighbor||'?'}:${p.ip||'?'}</div>
+      <div class="hint po-hint" style="margin-top:6px"></div>
       <div class="row" style="margin-top:8px">
-        <div><label>Native VLAN</label><input value="${p.native}" oninput="pos[${i}].native=this.value;gen()"></div>
-        <div style="flex:2"><label>Allowed VLAN</label><input value="${p.allowed}" oninput="pos[${i}].allowed=this.value;gen()"></div>
+        <div><label>Native VLAN</label><input class="f-native"></div>
+        <div style="flex:2"><label>Allowed VLAN</label><input class="f-allowed"></div>
         <div style="flex:.7"><label>Mode</label>
-          <select onchange="pos[${i}].mode=this.value;gen()">
-            ${['active','passive','on','desirable'].map(o=>`<option ${o===p.mode?'selected':''}>${o}</option>`).join('')}
+          <select class="f-mode">
+            ${['active','passive','on','desirable'].map(o=>`<option>${o}</option>`).join('')}
           </select>
         </div>
       </div>
-      <div class="memwrap">${memHtml}</div>
+      <div class="memwrap"></div>
       <div class="actions">
-        <button class="btn-ghost btn-sm" onclick="pos[${i}].members.push({local:'',remote:''});renderPos();gen()">+ Interfaz</button>
+        <button class="btn-ghost btn-sm" data-act="addMem">+ Interfaz</button>
       </div>
     </div>`);
+
+    // Referencias a los nodos que vamos a leer/actualizar
+    const ttl     = card.querySelector('.ttl');
+    const poHint  = card.querySelector('.po-hint');
+    const fNum    = card.querySelector('.f-num');
+    const fNeigh  = card.querySelector('.f-neighbor');
+    const fIp     = card.querySelector('.f-ip');
+    const fNative = card.querySelector('.f-native');
+    const fAllow  = card.querySelector('.f-allowed');
+    const fMode   = card.querySelector('.f-mode');
+    const memwrap = card.querySelector('.memwrap');
+
+    // Valores iniciales desde el modelo
+    fNum.value=p.num; fNeigh.value=p.neighbor; fIp.value=p.ip;
+    fNative.value=p.native; fAllow.value=p.allowed; fMode.value=p.mode;
+
+    // Refresca SOLO los textos de preview (sin tocar inputs) -> no pierde foco
+    function refreshPreview(){
+      ttl.textContent='Port-channel'+(p.num||'?');
+      poHint.textContent='description '+(p.neighbor||'?')+':'+(p.ip||'?');
+      memwrap.querySelectorAll('.mem').forEach((row,j)=>{
+        const m=p.members[j];
+        row.querySelector('.hint').textContent = (m&&m.local)? descMember(p,m):'';
+      });
+    }
+
+    // Campos que afectan los textos de preview: actualizan modelo + preview + config,
+    // pero NO reconstruyen el DOM (este es el fix del BUG 1).
+    fNum.addEventListener('input',()=>{p.num=fNum.value;refreshPreview();gen();});
+    fNeigh.addEventListener('input',()=>{p.neighbor=fNeigh.value;refreshPreview();gen();});
+    fIp.addEventListener('input',()=>{p.ip=fIp.value;refreshPreview();gen();});
+    // Campos que solo afectan la salida
+    fNative.addEventListener('input',()=>{p.native=fNative.value;gen();});
+    fAllow.addEventListener('input',()=>{p.allowed=fAllow.value;gen();});
+    fMode.addEventListener('change',()=>{p.mode=fMode.value;gen();});
+
+    // Acciones estructurales -> sí reconstruyen (renderPos ya llama a gen() al final)
+    card.querySelector('[data-act="rmPo"]').addEventListener('click',()=>{pos.splice(i,1);renderPos();});
+    card.querySelector('[data-act="addMem"]').addEventListener('click',()=>{p.members.push({local:'',remote:''});renderPos();});
+    // Duplicar Po: clona vecino/native/allowed/mode con nuevo número; IP e interfaces quedan en blanco
+    card.querySelector('[data-act="dupPo"]').addEventListener('click',()=>{
+      pos.splice(i+1,0,{num:nextPoNum(),neighbor:p.neighbor,ip:'',native:p.native,
+        allowed:p.allowed,mode:p.mode,members:[{local:'',remote:''}]});
+      renderPos();
+    });
+
+    // --- Miembros (interfaz local + puerto remoto) ---
+    p.members.forEach((m,j)=>{
+      const row=el(`<div class="mem">
+        <div>
+          <label>Interfaz local</label>
+          <input class="m-local" placeholder="GigabitEthernet1/1/1">
+        </div>
+        <div>
+          <label>Puerto remoto (vecino)</label>
+          <input class="m-remote" placeholder="Gi1/0/12">
+          <div class="hint"></div>
+        </div>
+        <button class="btn-x" data-act="rmMem">✕</button>
+      </div>`);
+      const mLocal=row.querySelector('.m-local');
+      const mRemote=row.querySelector('.m-remote');
+      mLocal.value=m.local; mRemote.value=m.remote;
+      // Tipear en un miembro actualiza modelo + su hint + config (sin rebuild)
+      mLocal.addEventListener('input',()=>{m.local=mLocal.value;refreshPreview();gen();});
+      mRemote.addEventListener('input',()=>{m.remote=mRemote.value;refreshPreview();gen();});
+      row.querySelector('[data-act="rmMem"]').addEventListener('click',()=>{p.members.splice(j,1);renderPos();});
+      memwrap.appendChild(row);
+    });
+
+    refreshPreview();
+    poCards.push(card);
     c.appendChild(card);
   });
   gen();
 }
 
-/* ---------- Generation ---------- */
+/* ---------- Helpers ---------- */
 function descMember(p,m){return `${p.neighbor||'?'}:${m.remote||'?'}:${p.ip||'?'}`;}
+
+// Expande abreviaturas de interfaz Cisco (Gi1/1/1 -> GigabitEthernet1/1/1).
+// Si ya viene el nombre completo o el prefijo es desconocido, devuelve el texto tal cual.
+function expandIface(s){
+  s=(s||'').trim();
+  const m=s.match(/^([a-zA-Z][a-zA-Z\-]*?)\s*(\d.*)$/);
+  if(!m) return s;
+  const map={
+    fa:'FastEthernet', fas:'FastEthernet', fast:'FastEthernet',
+    gi:'GigabitEthernet', gig:'GigabitEthernet',
+    te:'TenGigabitEthernet', ten:'TenGigabitEthernet',
+    twe:'TwentyFiveGigE', twentyfive:'TwentyFiveGigE',
+    fo:'FortyGigabitEthernet', forty:'FortyGigabitEthernet',
+    hu:'HundredGigE', hund:'HundredGigE', hundred:'HundredGigE',
+    ap:'AppGigabitEthernet', app:'AppGigabitEthernet',
+    po:'Port-channel'
+  };
+  const full=map[m[1].toLowerCase()];
+  return full ? full+m[2] : s;
+}
+
+// Validación simple de IPv4 (cuatro octetos 0-255). No valida máscara ni rango especial.
+function isIPv4(s){
+  const m=(s||'').trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return !!m && m.slice(1).every(o=>+o<=255);
+}
 
 function gen(){
   const lines=[];
@@ -265,7 +371,7 @@ function gen(){
     lines.push(` spanning-tree link-type point-to-point`);
     lines.push('!');
     p.members.forEach(m=>{
-      lines.push(`interface ${m.local}`);
+      lines.push(`interface ${expandIface(m.local)}`);
       lines.push(` description ${p.neighbor}:${m.remote}:${p.ip}`);
       lines.push(` switchport trunk native vlan ${native}`);
       lines.push(` switchport trunk allowed vlan ${allowed}`);
@@ -281,14 +387,45 @@ function gen(){
 
 function renderWarnings(){
   const w=[];
-  pos.forEach(p=>{
-    if(!p.neighbor||!p.ip)w.push(`Port-channel${p.num}: falta vecino o IP.`);
-    if(!p.members.length)w.push(`Port-channel${p.num}: sin interfaces miembro.`);
-    p.members.forEach(m=>{if(!m.local)w.push(`Port-channel${p.num}: interfaz local vacía.`);});
+  const badIdx=new Set();   // índices de Po a resaltar en rojo
+
+  // Conteo de interfaces locales normalizadas para detectar la misma física en dos Po
+  const localCount={};
+  pos.forEach(p=>p.members.forEach(m=>{
+    if(m.local && m.local.trim()){
+      const k=expandIface(m.local).toLowerCase();
+      localCount[k]=(localCount[k]||0)+1;
+    }
+  }));
+
+  pos.forEach((p,i)=>{
+    let bad=false;
+    if(!p.neighbor||!p.ip){w.push(`Port-channel${p.num}: falta vecino o IP.`);bad=true;}
+    if(p.ip && !isIPv4(p.ip)){w.push(`Port-channel${p.num}: IP "${p.ip}" no parece IPv4.`);bad=true;}
+    if(!p.members.length){w.push(`Port-channel${p.num}: sin interfaces miembro.`);bad=true;}
+    p.members.forEach(m=>{
+      if(!m.local){w.push(`Port-channel${p.num}: interfaz local vacía.`);bad=true;}
+      else if(localCount[expandIface(m.local).toLowerCase()]>1){
+        w.push(`Port-channel${p.num}: interfaz ${m.local} repetida en otro Po.`);bad=true;
+      }
+    });
+    if(bad)badIdx.add(i);
   });
+
+  // Números de Po repetidos: avisar y marcar los que comparten número
   const nums=pos.map(p=>p.num);
-  if(new Set(nums).size!==nums.length)w.push('Hay números de Po repetidos.');
-  $('warnBox').innerHTML = w.length? `<div class="warn">⚠ ${w.join('<br>⚠ ')}</div>`:'';
+  if(new Set(nums).size!==nums.length){
+    w.push('Hay números de Po repetidos.');
+    const seen={};
+    nums.forEach((n,i)=>{(seen[n]=seen[n]||[]).push(i);});
+    Object.values(seen).forEach(arr=>{if(arr.length>1)arr.forEach(i=>badIdx.add(i));});
+  }
+
+  // Aplicar resaltado a cada tarjeta
+  poCards.forEach((card,i)=>card.classList.toggle('po-bad',badIdx.has(i)));
+
+  const uniq=[...new Set(w)];   // evitar líneas duplicadas
+  $('warnBox').innerHTML = uniq.length? `<div class="warn">⚠ ${uniq.join('<br>⚠ ')}</div>`:'';
 }
 
 /* ---------- Acciones ---------- */
@@ -328,3 +465,4 @@ loadExample();
 </script>
 </body>
 </html>
+
